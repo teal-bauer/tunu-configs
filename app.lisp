@@ -1,5 +1,5 @@
 (def dataArray_0x7E0 (array-create 8))
-(def dataArray_0x7E1 (array-create 8))
+(def dataArray_0x7E1 (array-create 6))
 (def dataArray_0x7E2 (array-create 8))
 (def dataArray_0x7E3 (array-create 8))
 (def dataArray_0x7E4 (array-create 8))
@@ -15,14 +15,12 @@
 (def statusByte_1 0x00)
 (def tick 0)
 
-; ECU firmware identification for 0x7E8 (tunu LISP build constants).
-; ecu-service decodes byte 4 as motor rated power (kW), byte 5 as max speed
-; (km/h, BCD), byte 6 as base SW version (high.low nibble), byte 7 as app
-; SW revision (decimal value of the byte).
-(def motor-power-kw 3)
-(def max-speed-kmh 45)
+; 0x7E8 bytes 4-7: rated power (BCD kW), max speed (BCD km/h), base SW version
+; (BCD nibbles), app revision (plain byte).
+(def motor-power-kw 0x03)
+(def max-speed-kmh 0x45)
 (def sw-base-version 0x10)  ; "1.0"
-(def sw-app-version 1)      ; tunu revision counter
+(def sw-app-version 1)
 
 ; KERS state
 (def kers-enabled false)
@@ -70,9 +68,8 @@
     (can-send-sid 0x7E5 dataArray_0x7E5)
 })
 
-; Map a VESC fault code onto the Bosch ECU fault numbering that ecu-service
-; recognises. Unmapped VESC faults collapse to 16 (Internal 15V abnormal),
-; which is closest to a generic "controller hardware issue" indicator.
+; Map a VESC fault code onto the 0x7E1 numbering, which is the same number as
+; the dashboard LED blink code. Unmapped faults collapse to 16, internal 15V.
 (defun map-vesc-fault (v)
     (cond
         ((= v 0) 0)
@@ -98,11 +95,8 @@
 })
 
 ; Send ECU_status5 (0x7E8): firmware identification block.
-;   bytes 0-3 = reserved (historically warranty date)
-;   byte  4   = motor rated power (kW)
-;   byte  5   = motor max speed (km/h, BCD)
-;   byte  6   = base SW version (high.low nibble)
-;   byte  7   = application SW revision
+;   bytes 0-3 = warranty date, unused
+;   bytes 4-7 = see the BCD constants above
 (defun send-firmware-id () {
     (bufset-u32 dataArray_0x7E8 0 0)
     (bufset-u8 dataArray_0x7E8 4 motor-power-kw)
@@ -112,8 +106,8 @@
     (can-send-sid 0x7E8 dataArray_0x7E8)
 })
 
-; Send the ECU configuration block (0x7E9-0x7EF) sourced from the live
-; VESC motor config. ecu-service expects 10mV / 10mA units on the wire.
+; Send the ECU configuration block (0x7E9-0x7EF) from the live motor config.
+; 10mV / 10mA units on the wire.
 (defun send-config-block () {
     (bufset-u16 dataArray_0x7E9 0 (to-i (* (conf-get 'l-max-vin) 100)))
     (can-send-sid 0x7E9 dataArray_0x7E9)
@@ -123,15 +117,15 @@
     (can-send-sid 0x7EA dataArray_0x7EA)
     (sleep 0.005)
 
-    ; Speed limit ratio: no direct VESC equivalent; report 100% so consumers
-    ; don't infer a derate.
+    ; No VESC equivalent, report 100% so nothing infers a derate.
     (bufset-u8 dataArray_0x7EB 0 100)
     (can-send-sid 0x7EB dataArray_0x7EB)
     (sleep 0.005)
 
-    ; Wheel circumference in cm derived from the configured wheel diameter.
+    ; Rolling circumference in cm, with the same 1.03 calibration send_stats
+    ; applies to the reported km/h.
     (bufset-u8 dataArray_0x7EC 0
-        (to-i (* (conf-get 'si-wheel-diameter) 3.14159 100)))
+        (to-i (/ (* (conf-get 'si-wheel-diameter) 3.14159 100) 1.03)))
     (can-send-sid 0x7EC dataArray_0x7EC)
     (sleep 0.005)
 
@@ -139,7 +133,7 @@
     (can-send-sid 0x7EE dataArray_0x7EE)
     (sleep 0.005)
 
-    ; No separate startup-current parameter on VESC; mirror the peak limit.
+    ; No separate startup current on VESC, mirror the peak limit.
     (bufset-u16 dataArray_0x7EF 0 (to-i (* (conf-get 'l-current-max) 100)))
     (can-send-sid 0x7EF dataArray_0x7EF)
     (sleep 0.005)
@@ -278,8 +272,6 @@
     (sleep 0.01)
     (can-send-sid 0x7E2 dataArray_0x7E2)
     (sleep 0.01)
-    (send-status2)
-    (sleep 0.01)
 })
 
 ; Check PC4 voltage and save odometer/runtime on shutdown
@@ -306,18 +298,24 @@
 ; Send initial status4 as not-kers (ebs_disabled)
 (send-status4 0 1)
 
-; Announce firmware identity and configuration to anyone listening, so a
-; consumer that came up after the ECU still gets the boot burst it expects.
+; Broadcast identity and config at boot. Nothing requests 0x4EF on its own
+; unless a fault was reported first.
 (sleep 0.01)
 (send-firmware-id)
 (sleep 0.01)
 (send-config-block)
 
-; Main loop: 5ms tick, shutdown check every tick, CAN stats every 40th tick (200ms)
+; Main loop: 5ms tick, shutdown check every tick, CAN stats every 40th tick
+; (200ms), diagnostics every 200th (1s). A fault repeated faster than 1Hz keeps
+; resetting the consumer's 0.5s request timer, so it never asks for the state
+; that would clear the fault.
 (loopwhile t {
     (check-shutdown)
     (if (= (mod tick 40) 0) {
         (send_stats)
+    })
+    (if (= (mod tick 200) 0) {
+        (send-status2)
     })
     (def tick (+ tick 1))
     (sleep 0.005)
