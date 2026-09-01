@@ -92,9 +92,13 @@
         (def kers-current (* raw-current 10))
         (print (list "KERS params V:" kers-voltage "mV, I:" kers-current "mA"))
 
-        ; Store scaled values to echo back on 0x7E5
-        (bufset-u16 dataArray_0x7E5 0 (* raw-voltage 10))
-        (bufset-u16 dataArray_0x7E5 2 (* raw-current 10))
+        ; Echo the incoming values straight back on 0x7E5. Both the request
+        ; (0x4E2) and the report (0x7E5) use 10mV / 10mA units on the wire,
+        ; so the raw u16 from data is already in the right scale; applying
+        ; a second x10 here would overflow the u16 and produce nonsense at
+        ; the receiver.
+        (bufset-u16 dataArray_0x7E5 0 raw-voltage)
+        (bufset-u16 dataArray_0x7E5 2 raw-current)
 
         ; Immediately echo back ebs_get
         (send-ebs-get)
