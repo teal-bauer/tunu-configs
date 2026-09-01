@@ -1,12 +1,31 @@
 (def dataArray_0x7E0 (array-create 8))
-(def dataArray_0x7E1 (array-create 8))
+(def dataArray_0x7E1 (array-create 6))
 (def dataArray_0x7E2 (array-create 8))
 (def dataArray_0x7E3 (array-create 8))
 (def dataArray_0x7E4 (array-create 8))
 (def dataArray_0x7E5 (array-create 4))
+(def dataArray_0x7E8 (array-create 8))
+(def dataArray_0x7E9 (array-create 2))
+(def dataArray_0x7EA (array-create 2))
+(def dataArray_0x7EB (array-create 1))
+(def dataArray_0x7EC (array-create 1))
+(def dataArray_0x7EE (array-create 2))
+(def dataArray_0x7EF (array-create 2))
 (def can-cnt 0)
 (def statusByte_1 0x00)
 (def tick 0)
+
+; 0x7E8 bytes 4-7: rated power (BCD kW), max speed (BCD km/h), base SW version
+; (BCD nibbles), app revision (plain byte).
+(def motor-power-kw 0x03)
+(def max-speed-kmh 0x45)
+(def sw-base-version 0x10)  ; "1.0"
+(def sw-app-version 1)
+
+(def pole-pairs 24.0)
+
+; Empirical speed/odometer calibration, matches CalibrationFactor in ecu-service.
+(def speed-cal 1.03)
 
 ; KERS state
 (def kers-enabled false)
@@ -52,6 +71,79 @@
 ; Send ECU_ebs_get (0x7E5) echoing back current KERS parameters
 (defun send-ebs-get () {
     (can-send-sid 0x7E5 dataArray_0x7E5)
+})
+
+; Map a VESC fault code onto the 0x7E1 numbering, which is the same number as
+; the dashboard LED blink code. Unmapped faults collapse to 16, internal 15V.
+(defun map-vesc-fault (v)
+    (cond
+        ((= v 0) 0)
+        ((= v 1) 1)   ; over-voltage
+        ((= v 2) 2)   ; under-voltage
+        ((= v 3) 6)   ; DRV / gate driver -> MOSFET
+        ((= v 4) 4)   ; abs over-current -> motor stalled
+        ((= v 5) 11)  ; over-temp FET -> controller over-heat
+        ((= v 6) 13)  ; over-temp motor -> motor temperature protection
+        (t 16)
+    )
+)
+
+; Send ECU_status2 (0x7E1): temperature + fault code.
+;   byte 0   = ECU/FET temperature (°C, i8)
+;   byte 1   = reserved
+;   bytes 2-5 = fault code (u32, big-endian)
+(defun send-status2 () {
+    ; No FET temperature sensor on this controller: get-temp-fet reads a
+    ; floating ADC and climbs into triple digits. Report 0 instead.
+    (bufset-i8 dataArray_0x7E1 0 0)
+    (bufset-u8 dataArray_0x7E1 1 0)
+    (bufset-u32 dataArray_0x7E1 2 (map-vesc-fault (get-fault)))
+    (can-send-sid 0x7E1 dataArray_0x7E1)
+})
+
+; Send ECU_status5 (0x7E8): firmware identification block.
+;   bytes 0-3 = warranty date, unused
+;   bytes 4-7 = see the BCD constants above
+(defun send-firmware-id () {
+    (bufset-u32 dataArray_0x7E8 0 0)
+    (bufset-u8 dataArray_0x7E8 4 motor-power-kw)
+    (bufset-u8 dataArray_0x7E8 5 max-speed-kmh)
+    (bufset-u8 dataArray_0x7E8 6 sw-base-version)
+    (bufset-u8 dataArray_0x7E8 7 sw-app-version)
+    (can-send-sid 0x7E8 dataArray_0x7E8)
+})
+
+; Send the ECU configuration block (0x7E9-0x7EF) from the live motor config.
+; 10mV / 10mA units on the wire.
+(defun send-config-block () {
+    (bufset-u16 dataArray_0x7E9 0 (to-i (* (conf-get 'l-max-vin) 100)))
+    (can-send-sid 0x7E9 dataArray_0x7E9)
+    (sleep 0.005)
+
+    (bufset-u16 dataArray_0x7EA 0 (to-i (* (conf-get 'l-min-vin) 100)))
+    (can-send-sid 0x7EA dataArray_0x7EA)
+    (sleep 0.005)
+
+    ; No VESC equivalent, report 100% so nothing infers a derate.
+    (bufset-u8 dataArray_0x7EB 0 100)
+    (can-send-sid 0x7EB dataArray_0x7EB)
+    (sleep 0.005)
+
+    ; Rolling circumference in cm, with the same 1.03 calibration send_stats
+    ; applies to the reported km/h.
+    (bufset-u8 dataArray_0x7EC 0
+        (to-i (/ (* (conf-get 'si-wheel-diameter) 3.14159 100) speed-cal)))
+    (can-send-sid 0x7EC dataArray_0x7EC)
+    (sleep 0.005)
+
+    (bufset-u16 dataArray_0x7EE 0 (to-i (* (conf-get 'l-current-max) 100)))
+    (can-send-sid 0x7EE dataArray_0x7EE)
+    (sleep 0.005)
+
+    ; No separate startup current on VESC, mirror the peak limit.
+    (bufset-u16 dataArray_0x7EF 0 (to-i (* (conf-get 'l-current-max) 100)))
+    (can-send-sid 0x7EF dataArray_0x7EF)
+    (sleep 0.005)
 })
 
 ; Handler for SID CAN-frames
@@ -115,6 +207,10 @@
         )
         (sleep 0.01)
         (send-ebs-get)
+        (sleep 0.01)
+        (send-firmware-id)
+        (sleep 0.01)
+        (send-config-block)
     })
 
     ; Control_Message_ID1 (0x4EB) - Speed limit ratio
@@ -162,9 +258,9 @@
     ; Negative values = regen (charging battery)
     (bufset-i16 dataArray_0x7E0 2 (to-i (* (get-current-in) 100.0)))
 
-    (var speedhere (/ (* (get-speed) 3.6) 1.03))
+    (var speedhere (/ (* (get-speed) 3.6) speed-cal))
 
-    (bufset-u16 dataArray_0x7E0 4 (to-i (/ (to-float (abs (get-rpm))) 24.0)))
+    (bufset-u16 dataArray_0x7E0 4 (to-i (/ (to-float (abs (get-rpm))) pole-pairs)))
     (bufset-u8 dataArray_0x7E0 6 speedhere)
 
     ; Flags: bit0 = throttle, bit1 = brake (regen active)
@@ -209,11 +305,24 @@
 ; Send initial status4 as not-kers (ebs_disabled)
 (send-status4 0 1)
 
-; Main loop: 5ms tick, shutdown check every tick, CAN stats every 40th tick (200ms)
+; Broadcast identity and config at boot. Nothing requests 0x4EF on its own
+; unless a fault was reported first.
+(sleep 0.01)
+(send-firmware-id)
+(sleep 0.01)
+(send-config-block)
+
+; Main loop: 5ms tick, shutdown check every tick, CAN stats every 40th tick
+; (200ms), diagnostics every 200th (1s). A fault repeated faster than 1Hz keeps
+; resetting the consumer's 0.5s request timer, so it never asks for the state
+; that would clear the fault.
 (loopwhile t {
     (check-shutdown)
     (if (= (mod tick 40) 0) {
         (send_stats)
+    })
+    (if (= (mod tick 200) 0) {
+        (send-status2)
     })
     (def tick (+ tick 1))
     (sleep 0.005)
