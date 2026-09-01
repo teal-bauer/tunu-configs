@@ -29,6 +29,10 @@
 (def min-vin 20.0)
 (def wheel-diameter 0.416)
 (def current-max 210.0)
+(def pole-pairs 24.0)
+
+; Empirical speed/odometer calibration, matches CalibrationFactor in ecu-service.
+(def speed-cal 1.03)
 
 ; KERS state
 (def kers-enabled false)
@@ -105,7 +109,9 @@
 ;   byte 1   = reserved
 ;   bytes 2-5 = fault code (u32, big-endian)
 (defun send-status2 () {
-    (bufset-i8 dataArray_0x7E1 0 (to-i (get-temp-fet)))
+    ; No FET temperature sensor on this controller: get-temp-fet reads a
+    ; floating ADC and climbs into triple digits. Report 0 instead.
+    (bufset-i8 dataArray_0x7E1 0 0)
     (bufset-u8 dataArray_0x7E1 1 0)
     (bufset-u32 dataArray_0x7E1 2 (map-vesc-fault (get-fault)))
     (can-send-sid 0x7E1 dataArray_0x7E1)
@@ -142,7 +148,7 @@
     ; Rolling circumference in cm, with the same 1.03 calibration send_stats
     ; applies to the reported km/h.
     (bufset-u8 dataArray_0x7EC 0
-        (to-i (/ (* wheel-diameter 3.14159 100) 1.03)))
+        (to-i (/ (* wheel-diameter 3.14159 100) speed-cal)))
     (can-send-sid 0x7EC dataArray_0x7EC)
     (sleep 0.005)
 
@@ -268,9 +274,9 @@
     ; Negative values = regen (charging battery)
     (bufset-i16 dataArray_0x7E0 2 (to-i (* (get-current-in) 100.0)))
 
-    (var speedhere (/ (* (get-speed) 3.6) 1.03))
+    (var speedhere (/ (* (get-speed) 3.6) speed-cal))
 
-    (bufset-u16 dataArray_0x7E0 4 (to-i (/ (to-float (abs (get-rpm))) 24.0)))
+    (bufset-u16 dataArray_0x7E0 4 (to-i (/ (to-float (abs (get-rpm))) pole-pairs)))
     (bufset-u8 dataArray_0x7E0 6 speedhere)
 
     ; Flags: bit0 = throttle, bit1 = brake (regen active)
