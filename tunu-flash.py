@@ -366,10 +366,11 @@ def cmd_read(v):
 
 
 def build_image(source_bytes):
-    """Wrap raw lisp source as the flash image VESC Tool would write:
-    [len_u32][crc_u16][flags_u16][blob], blob = source + b'\\0',
-    crc = crc16(flags_bytes + blob)."""
-    blob = source_bytes + b"\x00"
+    """Wrap raw lisp source as the flash image VESC Tool writes:
+    [len_u32][crc_u16][flags_u16][blob], blob = source + NUL + u16 import
+    count (0; import tables are not supported here), crc = crc16(flags_bytes
+    + blob). Verified byte-identical against an image VESC Tool installed."""
+    blob = source_bytes + b"\x00" + b"\x00\x00"
     flags = b"\x00\x00"
     crc = crc16(flags + blob)
     header = be32(len(blob)) + be16(crc) + flags
