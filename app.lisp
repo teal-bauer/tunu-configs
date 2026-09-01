@@ -22,11 +22,13 @@
 (def sw-base-version 0x10)  ; "1.0"
 (def sw-app-version 1)
 
-; Input voltage limits, mirrored from the mcconf XMLs. This firmware's conf-get
-; does not recognize 'l-max-vin / 'l-min-vin (type_error on script load), so
-; they cannot be read from the live config.
+; Values mirrored from the mcconf XMLs (identical in both variants). This
+; firmware's conf-get does not recognize these parameter names (type_error on
+; script load), so they cannot be read from the live config.
 (def max-vin 65.0)
 (def min-vin 20.0)
+(def wheel-diameter 0.416)
+(def current-max 210.0)
 
 ; KERS state
 (def kers-enabled false)
@@ -112,8 +114,8 @@
     (can-send-sid 0x7E8 dataArray_0x7E8)
 })
 
-; Send the ECU configuration block (0x7E9-0x7EF) from the live motor config.
-; 10mV / 10mA units on the wire.
+; Send the ECU configuration block (0x7E9-0x7EF) from the mirrored mcconf
+; constants above. 10mV / 10mA units on the wire.
 (defun send-config-block () {
     (bufset-u16 dataArray_0x7E9 0 (to-i (* max-vin 100)))
     (can-send-sid 0x7E9 dataArray_0x7E9)
@@ -131,16 +133,16 @@
     ; Rolling circumference in cm, with the same 1.03 calibration send_stats
     ; applies to the reported km/h.
     (bufset-u8 dataArray_0x7EC 0
-        (to-i (/ (* (conf-get 'si-wheel-diameter) 3.14159 100) 1.03)))
+        (to-i (/ (* wheel-diameter 3.14159 100) 1.03)))
     (can-send-sid 0x7EC dataArray_0x7EC)
     (sleep 0.005)
 
-    (bufset-u16 dataArray_0x7EE 0 (to-i (* (conf-get 'l-current-max) 100)))
+    (bufset-u16 dataArray_0x7EE 0 (to-i (* current-max 100)))
     (can-send-sid 0x7EE dataArray_0x7EE)
     (sleep 0.005)
 
     ; No separate startup current on VESC, mirror the peak limit.
-    (bufset-u16 dataArray_0x7EF 0 (to-i (* (conf-get 'l-current-max) 100)))
+    (bufset-u16 dataArray_0x7EF 0 (to-i (* current-max 100)))
     (can-send-sid 0x7EF dataArray_0x7EF)
     (sleep 0.005)
 })
