@@ -22,6 +22,12 @@
 (def sw-base-version 0x10)  ; "1.0"
 (def sw-app-version 1)
 
+; Input voltage limits, mirrored from the mcconf XMLs. This firmware's conf-get
+; does not recognize 'l-max-vin / 'l-min-vin (type_error on script load), so
+; they cannot be read from the live config.
+(def max-vin 65.0)
+(def min-vin 20.0)
+
 ; KERS state
 (def kers-enabled false)
 (def kers-voltage 0)
@@ -118,11 +124,11 @@
 ; Send the ECU configuration block (0x7E9-0x7EF) from the live motor config.
 ; 10mV / 10mA units on the wire.
 (defun send-config-block () {
-    (bufset-u16 dataArray_0x7E9 0 (to-i (* (conf-get 'l-max-vin) 100)))
+    (bufset-u16 dataArray_0x7E9 0 (to-i (* max-vin 100)))
     (can-send-sid 0x7E9 dataArray_0x7E9)
     (sleep 0.005)
 
-    (bufset-u16 dataArray_0x7EA 0 (to-i (* (conf-get 'l-min-vin) 100)))
+    (bufset-u16 dataArray_0x7EA 0 (to-i (* min-vin 100)))
     (can-send-sid 0x7EA dataArray_0x7EA)
     (sleep 0.005)
 
