@@ -21,6 +21,8 @@ Usage (copy to the MDB, e.g. scp to deep-blue:/data/, then run there):
     tunu-flash.py stats                       lisp engine stats + global bindings
     tunu-flash.py read > current.lisp         read back the installed script
     tunu-flash.py write app.lisp              erase + chunked write + verify + run
+    tunu-flash.py output off [seconds]        disable app throttle output (default 120 s)
+    tunu-flash.py output on                   re-enable app throttle output
     tunu-flash.py engine on|off               just toggle engine power via lsc
 
 Common flags:
@@ -31,10 +33,18 @@ Common flags:
     --no-engine     do not touch engine power (assume it is already on)
     --keep-engine   leave the engine on afterwards (default restores prior state)
 
-The `write` path stops lisp execution (SET_RUNNING 0), erases, writes the
-image in CRC-checked chunks, reads it back to verify, then restarts lisp
-(SET_RUNNING 1). It refuses to run unless `version` first succeeds against the
-target.
+The `write` path first disables the app throttle output for 120 s via the
+REPL extension (app-disable-output), because the appconf runs app_to_use=5
+(ADC+UART): the physical throttle is live whenever the ECU is powered, and a
+twist during an upload would move the motor. Only then does it stop lisp
+(SET_RUNNING 0), erase, write the image in CRC-checked chunks, read it back to
+verify, and restart lisp (SET_RUNNING 1), finishing with (app-disable-output 0)
+to re-enable output. If that final REPL fails, output re-enables on its own
+when the 120 s window expires. The whole write aborts if the initial
+disable-output call does not confirm, or if the target does not answer a
+version query. The `output` subcommand exposes the same guard manually;
+app_disable_output lives in app.c, independent of the lisp engine, so it works
+even with no script installed.
 """
 
 import argparse
@@ -366,6 +376,14 @@ def build_image(source_bytes):
     return header + blob, blob
 
 
+def cmd_output_disable(v, ms):
+    """Call (app-disable-output ms) via the REPL. ms=0 re-enables output
+    immediately, ms>0 disables it for that long. Returns True when the
+    extension confirmed with t."""
+    lines = cmd_repl(v, "(app-disable-output %d)" % ms, collect=2.0)
+    return any(line.strip() == "> t" for line in lines)
+
+
 def cmd_set_running(v, running):
     reply = v.query([COMM_LISP_SET_RUNNING, 1 if running else 0],
                     expect_id=COMM_LISP_SET_RUNNING, timeout=3.0)
@@ -428,6 +446,9 @@ def main():
     sub.add_parser("stats")
     sub.add_parser("read")
     p = sub.add_parser("write"); p.add_argument("file")
+    p = sub.add_parser("output")
+    p.add_argument("state", choices=["on", "off"])
+    p.add_argument("seconds", nargs="?", type=int, default=120)
     p = sub.add_parser("engine"); p.add_argument("state", choices=["on", "off"])
     args = ap.parse_args()
 
@@ -467,6 +488,17 @@ def main():
                 for name, val in s["bindings"]:
                     print("  %-24s %g" % (name, val))
 
+        elif args.cmd == "output":
+            ms = 0 if args.state == "on" else args.seconds * 1000
+            if cmd_output_disable(v, ms):
+                if ms == 0:
+                    print("app output re-enabled")
+                else:
+                    print("app output disabled for %d s" % args.seconds)
+            else:
+                sys.stderr.write("app-disable-output did not confirm\n")
+                rc = 1
+
         elif args.cmd == "read":
             blob = cmd_read(v)
             source = blob.split(b"\x00", 1)[0]
@@ -486,6 +518,12 @@ def main():
                                  % (info["major"], info["minor"], info["hw_name"]))
                 with open(args.file, "rb") as f:
                     source = f.read()
+                # The physical throttle is live whenever the ECU is powered
+                # (app_to_use=5). Kill app output before touching anything so
+                # a twist during the upload cannot move the motor.
+                sys.stderr.write("disabling app output for 120 s...\n")
+                if not cmd_output_disable(v, 120000):
+                    raise IOError("aborting: (app-disable-output 120000) did not confirm")
                 sys.stderr.write("stopping lisp...\n")
                 cmd_set_running(v, False)
                 sys.stderr.write("erasing...\n")
@@ -500,7 +538,13 @@ def main():
                                   % (len(back), len(blob)))
                 sys.stderr.write("restarting lisp...\n")
                 cmd_set_running(v, True)
-                sys.stderr.write("done.\n")
+                sys.stderr.write("re-enabling app output...\n")
+                time.sleep(1.0)  # REPL rate limit, and let the new script boot
+                if cmd_output_disable(v, 0):
+                    sys.stderr.write("done.\n")
+                else:
+                    sys.stderr.write("done, but re-enable did not confirm; "
+                                     "output returns when the 120 s window expires\n")
     finally:
         v.close()
         if manage_engine and not args.keep_engine:
